@@ -27,6 +27,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- jsPDF & AutoTable -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.29/jspdf.plugin.autotable.min.js"></script>
 
     <style>
         body { font-family: 'Inter', sans-serif; }
@@ -76,6 +79,24 @@
 
         <!-- DASHBOARD VIEW -->
         <div id="view-dashboard" class="view-section space-y-6 animate-fade-in">
+            
+            <!-- Export Header -->
+            <div class="flex justify-end mb-4">
+                <div class="relative inline-block text-left group">
+                    <button class="bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold py-2 px-4 rounded-lg border border-gray-700 flex items-center gap-2 transition-colors">
+                        <i class="fa-solid fa-file-pdf text-red-400"></i> Export Statement
+                        <i class="fa-solid fa-chevron-down text-[10px] ml-1"></i>
+                    </button>
+                    <!-- Dropdown -->
+                    <div class="absolute right-0 mt-2 w-48 bg-gray-900 border border-gray-800 rounded-xl shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                        <div class="py-1">
+                            <button onclick="exportStatement('prev')" class="block w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white">Previous Cycle</button>
+                            <button onclick="exportStatement('active')" class="block w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white">Active Cycle</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Totals -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="glass-panel rounded-2xl p-6 relative overflow-hidden group">
@@ -1047,6 +1068,79 @@
             const b = state.bills.find(x => x.id === id);
             const newArr = (b.arrears||0) + baseAmt;
             await setDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'bills', id), { arrears: newArr }, { merge: true });
+        }
+
+        window.exportStatement = (type) => {
+            const cycles = getPayoutCycles(new Date());
+            const cycle = type === 'active' ? cycles.active : cycles.prev;
+            const startDate = cycle.start;
+            const endDate = cycle.end;
+            const rangeStr = `${formatDateShort(startDate)} - ${formatDateShort(endDate)}`;
+            
+            // 1. Get Income Logic
+            const incData = getCycleIncome(cycle);
+            const totalIncome = incData.amount;
+            
+            // 2. Get Expenses (Paid)
+            const expenses = state.ledger.filter(l => {
+                const d = new Date(l.date);
+                return l.type !== 'income' && l.type !== 'defer' && d >= startDate && d <= endDate;
+            });
+            const totalExpenses = expenses.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0);
+            
+            // 3. Get Pending (Only for Active)
+            let pendingItems = [];
+            let totalPending = 0;
+            if(type === 'active') {
+                state.bills.forEach(bill => { 
+                    if(!isBillCompleted(bill)) pendingItems.push(...getBillOccurrencesInCycle(bill, cycle)); 
+                });
+                pendingItems = pendingItems.filter(i => !i.isPaid);
+                totalPending = pendingItems.reduce((acc, curr) => acc + curr.amount, 0);
+            }
+
+            // Generate PDF
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+            
+            // Header
+            doc.setFontSize(20);
+            doc.text("FinTrack Financial Statement", 14, 22);
+            doc.setFontSize(10);
+            doc.setTextColor(100);
+            doc.text(`Period: ${type === 'active' ? 'Active Cycle' : 'Previous Cycle'} (${rangeStr})`, 14, 30);
+            
+            // Summary Table
+            doc.autoTable({
+                startY: 40,
+                head: [['Summary', 'Amount']],
+                body: [
+                    ['Total Income (Est + Received)', formatCurrency(totalIncome)],
+                    ['Total Expenses (Paid)', formatCurrency(totalExpenses)],
+                    ['Net Cash Flow', formatCurrency(totalIncome - totalExpenses)],
+                    ...(type === 'active' ? [['Pending Obligations', formatCurrency(totalPending)], ['Projected Balance', formatCurrency(totalIncome - totalExpenses - totalPending)]] : [])
+                ],
+                theme: 'striped',
+                headStyles: { fillColor: [59, 130, 246] }
+            });
+            
+            // Details Table
+            const rows = expenses.map(e => [e.date, e.category || 'Expense', e.description, formatCurrency(e.amount)]);
+            if(type === 'active' && pendingItems.length > 0) {
+                 pendingItems.forEach(p => rows.push([p.date, 'Pending Bill', `${p.name} (Due)`, `${formatCurrency(p.amount)}`]));
+            }
+            
+            doc.text("Transaction Details", 14, doc.lastAutoTable.finalY + 10);
+            doc.autoTable({
+                startY: doc.lastAutoTable.finalY + 15,
+                head: [['Date', 'Category', 'Description', 'Amount']],
+                body: rows,
+                theme: 'grid',
+                styles: { fontSize: 8 },
+                headStyles: { fillColor: [31, 41, 55] }
+            });
+            
+            doc.save(`FinTrack_Statement_${type}_${rangeStr}.pdf`);
         }
 
         window.setExpenseType = (t) => {
